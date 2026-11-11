@@ -1,0 +1,51 @@
+[project]
+name = "agent-trust-layer"
+version = "0.1.0"
+description = "Agent Trust Layer: owner-signed mandates, deterministic payment decisions for AI agents, simulated and Asaas sandbox rails, signed receipts"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "mcp>=1.2",
+    "pydantic>=2.7",
+    "httpx>=0.27",
+    "cryptography>=42",
+    "typer>=0.12",
+    "rich>=13",
+    "python-dotenv>=1.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "respx>=0.21",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+atl = "atl.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["atl"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+extend-exclude = ["wt", "var", "runs", "openspec", "docs", "*.md"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["B008"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "sandbox: calls the real Asaas sandbox (skipped by default; run with -m sandbox)",
+]
+addopts = "-m 'not sandbox' --import-mode=importlib"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
