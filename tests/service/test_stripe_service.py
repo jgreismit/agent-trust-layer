@@ -357,6 +357,8 @@ def test_payee_must_have_one_destination_kind():
 
 
 def _env(monkeypatch, tmp_path, **env):
+    # Never let these tests see a developer's real .env file.
+    monkeypatch.setattr("atl.config.find_dotenv", lambda *a, **k: None)
     for k in ("STRIPE_AGENT_KEY", "STRIPE_SECRET_KEY", "ATL_STRIPE_TRANSPORT", "STRIPE_FINANCIAL_ACCOUNT"):
         monkeypatch.setenv(k, "")
     monkeypatch.setenv("ATL_VAR_DIR", str(tmp_path / "var"))

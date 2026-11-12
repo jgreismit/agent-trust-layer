@@ -1,0 +1,18 @@
+{
+  "mandate_id": "mdt_us_example",
+  "owner_id": "owner-us-example",
+  "agent_id": "procurement-us-01",
+  "currency": "USD",
+  "payees": [
+    {
+      "payee_id": "acme-supply",
+      "display_name": "Acme Supply Co",
+      "stripe_recipient_id": "acct_PLACEHOLDER_run_atl_stripe_setup_recipient",
+      "categories": ["materials"]
+    }
+  ],
+  "per_payment_cap_cents": 50000,
+  "daily_cap_cents": 150000,
+  "hard_cap_cents": 200000,
+  "valid_until": "2027-06-30T23:59:59Z"
+}
