@@ -136,9 +136,9 @@ def load_settings(*, stdin_isatty: bool | None = None) -> Settings:
     root = REPO_ROOT
     var_dir = Path(os.environ.get("ATL_VAR_DIR") or root / "var")
     runs_dir = Path(os.environ.get("ATL_RUNS_DIR") or root / "runs")
-    rail: RailKind = (
-        "simulated" if os.environ.get("ATL_RAIL", "").lower() == "simulated" else "asaas"
-    )
+    rail = _rail_kind(os.environ.get("ATL_RAIL", ""))
+    if rail == "stripe" and env != "sandbox":
+        raise ATLError(PRODUCTION_BLOCKED, "the Stripe rail runs only with ATL_ENV=sandbox")
     prod_key = prod_key_type = None
 
     if env == "production":

@@ -309,12 +309,12 @@ class ATLService:
         mandate_id: str,
         agent_id: str,
         payee_id: str,
-        pix_key: str,
         amount_cents: int,
         category: str,
         invoice_ref: str,
         memo: str,
         idempotency_key: str,
+        pix_key: str = "",
         destination: str | None = None,
         currency: str | None = None,
     ) -> dict:

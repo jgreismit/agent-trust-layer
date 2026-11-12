@@ -72,6 +72,10 @@ class ToolResult:
     data: Any = None  # structuredContent, else JSON parsed from the text blocks, else None
     text: str = ""  # all text blocks joined
 
+    def __post_init__(self) -> None:
+        if self.data is None:
+            self.data = parse_text_json(self.text)
+
 
 @dataclass
 class RecipientSetup:
