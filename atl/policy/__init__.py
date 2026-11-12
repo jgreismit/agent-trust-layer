@@ -8,6 +8,11 @@ Public API (frozen):
 - Verdict to status: approve -> approved, escalate -> pending_owner, refuse -> refused.
 - All hits are reported; refuse wins over escalate. On R5, `original_decision_id` is set.
 - Pure: no writes, no clock reads (use `now`), no randomness except the new decision id.
+
+Stripe rail additions: R11 refuses an intent whose currency differs from the mandate's; R3 compares the
+destination the agent gives with the payee's registered destinations (the Pix key, unchanged, or the Stripe
+recipient or account id, exact string); money and the daily window follow the mandate currency (BRL: Sao
+Paulo day, USD: New York day). Payments held for rail confirmation count toward caps like approved ones.
 """
 
 from __future__ import annotations
@@ -27,8 +32,10 @@ from atl.contracts import (
     R8_SPLIT_PATTERN,
     R9_CATEGORY_NOT_ALLOWED,
     R10_OVER_HARD_CAP,
+    R11_CURRENCY_MISMATCH,
     Decision,
     Mandate,
+    PayeeRule,
     PaymentIntent,
     StoreView,
     Verdict,
@@ -38,6 +45,9 @@ from atl.policy.markers import find_markers
 from atl.policy.split import declared_part, order_ref, same_order_possible
 
 SAO_PAULO = ZoneInfo("America/Sao_Paulo")
+NEW_YORK = ZoneInfo("America/New_York")
+_DAY_ZONE = {"BRL": SAO_PAULO, "USD": NEW_YORK}
+_SYMBOL = {"BRL": "R$", "USD": "US$"}
 
 _REFUSE_RULES = {
     R1_MANDATE_INVALID,
@@ -46,20 +56,21 @@ _REFUSE_RULES = {
     R3_KEY_MISMATCH,
     R5_DUPLICATE,
     R10_OVER_HARD_CAP,
+    R11_CURRENCY_MISMATCH,
 }
 _STATUS = {"approve": "approved", "escalate": "pending_owner", "refuse": "refused"}
-_COUNTS_FOR_DAY = {"approved", "executed"}
-_COUNTS_FOR_SPLIT = {"approved", "executed", "pending_owner"}
+_COUNTS_FOR_DAY = {"approved", "executed", "pending_rail_confirmation"}
+_COUNTS_FOR_SPLIT = {"approved", "executed", "pending_owner", "pending_rail_confirmation"}
 
 
-def money(cents: int) -> str:
+def money(cents: int, currency: str = "BRL") -> str:
     sign = "-" if cents < 0 else ""
     cents = abs(cents)
-    return f"{sign}R$ {cents // 100}.{cents % 100:02d}"
+    return f"{sign}{_SYMBOL.get(currency, currency)} {cents // 100}.{cents % 100:02d}"
 
 
-def _day_start(now: datetime) -> datetime:
-    local = now.astimezone(SAO_PAULO)
+def _day_start(now: datetime, currency: str = "BRL") -> datetime:
+    local = now.astimezone(_DAY_ZONE.get(currency, SAO_PAULO))
     return local.replace(hour=0, minute=0, second=0, microsecond=0)
 
 
@@ -88,6 +99,18 @@ def _same_key(registered: str, given: str, key_type: str) -> bool:
     return a == b
 
 
+def destination_matches(payee: PayeeRule, intent: PaymentIntent) -> bool:
+    """True when the destination in the intent is exactly one the owner registered for this payee.
+
+    Pix: unchanged (the intent's pix_key, case-insensitive only for EMAIL keys). Stripe: the intent's
+    destination must equal the registered recipient id or connected account id, character for character.
+    """
+    if payee.destination_kind == "pix":
+        return _same_key(payee.pix_key or "", intent.pix_key, payee.pix_key_type or "")
+    given = (intent.destination if intent.destination is not None else intent.pix_key).strip()
+    return bool(given) and given in payee.destinations()
+
+
 def evaluate(
     intent: PaymentIntent,
     mandate: Mandate | None,
@@ -110,6 +133,17 @@ def evaluate(
         return _decision(intent, now, hits, reasons, None)
 
     amount = intent.amount_cents
+    cur = mandate.currency
+
+    def fmt(cents: int) -> str:
+        return money(cents, cur)
+
+    # G1b currency
+    if intent.currency is not None and intent.currency != cur:
+        hit(
+            R11_CURRENCY_MISMATCH,
+            f"Intent currency {intent.currency} differs from the mandate currency {cur}",
+        )
 
     # G2 payee identity
     payee = next((p for p in mandate.payees if p.payee_id == intent.payee_id), None)
@@ -121,8 +155,14 @@ def evaluate(
                 R9_CATEGORY_NOT_ALLOWED,
                 f"Category {intent.category} is not allowed for payee {payee.payee_id}",
             )
-        if not _same_key(payee.pix_key, intent.pix_key, payee.pix_key_type):
-            hit(R3_KEY_MISMATCH, f"Pix key differs from the registered key of {payee.payee_id}")
+        if not destination_matches(payee, intent):
+            if payee.destination_kind == "pix":
+                hit(R3_KEY_MISMATCH, f"Pix key differs from the registered key of {payee.payee_id}")
+            else:
+                hit(
+                    R3_KEY_MISMATCH,
+                    f"Destination differs from the registered Stripe destination of {payee.payee_id}",
+                )
 
     # G3 untrusted content
     markers = find_markers(intent.memo)
@@ -146,23 +186,23 @@ def evaluate(
 
     # G5 amount limits
     if amount > mandate.hard_cap_cents:
-        hit(R10_OVER_HARD_CAP, f"{money(amount)} is above the hard cap of {money(mandate.hard_cap_cents)}")
+        hit(R10_OVER_HARD_CAP, f"{fmt(amount)} is above the hard cap of {fmt(mandate.hard_cap_cents)}")
     elif amount > mandate.per_payment_cap_cents:
         hit(
             R6_OVER_PER_PAYMENT_CAP,
-            f"{money(amount)} is above the per-payment cap of {money(mandate.per_payment_cap_cents)}",
+            f"{fmt(amount)} is above the per-payment cap of {fmt(mandate.per_payment_cap_cents)}",
         )
 
     day_total = sum(
         i.amount_cents
-        for i, d in view.decisions_since(mandate.mandate_id, _day_start(now))
+        for i, d in view.decisions_since(mandate.mandate_id, _day_start(now, cur))
         if d.status in _COUNTS_FOR_DAY
     )
     if day_total + amount > mandate.daily_cap_cents:
         hit(
             R7_OVER_DAILY_CAP,
-            f"Today's total {money(day_total)} plus {money(amount)} is above the daily cap "
-            f"of {money(mandate.daily_cap_cents)}",
+            f"Today's total {fmt(day_total)} plus {fmt(amount)} is above the daily cap "
+            f"of {fmt(mandate.daily_cap_cents)}",
         )
 
     if amount <= mandate.per_payment_cap_cents:
@@ -186,14 +226,14 @@ def evaluate(
         if order_total > cap:
             hit(
                 R8_SPLIT_PATTERN,
-                f"Invoice is one of {part.parts} parts of an order totalling {money(order_total)}, "  # type: ignore[union-attr]
-                f"above the per-payment cap of {money(cap)}",
+                f"Invoice is one of {part.parts} parts of an order totalling {fmt(order_total)}, "  # type: ignore[union-attr]
+                f"above the per-payment cap of {fmt(cap)}",
             )
         elif recent + amount > cap:
             hit(
                 R8_SPLIT_PATTERN,
-                f"{money(recent)} already sent to {intent.payee_id} in 24 h plus {money(amount)} "
-                f"is above the per-payment cap of {money(cap)}",
+                f"{fmt(recent)} already sent to {intent.payee_id} in 24 h plus {fmt(amount)} "
+                f"is above the per-payment cap of {fmt(cap)}",
             )
 
     return _decision(intent, now, hits, reasons, original)

@@ -77,6 +77,9 @@ _KEY_PATTERNS = (
     re.compile(r"\+55[\s\-]?\(?\d{2}\)?[\s\-]?9?\d{4}[\s\-]?\d{4}"),  # phone
     re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"),  # EVP
     re.compile(r"\b(?:agencia|ag|conta|cc|account|agency)\b\.?\s*(?:n|no|num|numero|number)?\.?\s*[:#]?\s*\d{3,}"),
+    # Stripe rail: Stripe account, recipient, bank account and payout method ids, and US routing numbers.
+    re.compile(r"\b(?:acct|rcpt|ba|usba|fa)_[a-z0-9_]{6,}"),
+    re.compile(r"\b(?:routing|aba)\b\.?\s*(?:n|no|num|number)?\.?\s*[:#]?\s*\d{9}(?!\d)"),
 )
 
 
