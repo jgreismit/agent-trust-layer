@@ -3,6 +3,9 @@
 - Loads the sandbox key from `.env` (searched upward from the package, so git worktrees find it).
 - Never reads `.env.production` unless every promotion precondition holds.
 - Refuses any base URL that is not the Asaas sandbox host while ATL_ENV is sandbox.
+- Stripe rail (ATL_RAIL=stripe_sandbox): sandbox only. Refuses ATL_ENV other than sandbox, any host other
+  than mcp.stripe.com / api.stripe.com, and any Stripe key that is not a test-mode key, before any I/O.
+  Keys come from STRIPE_AGENT_KEY (MCP transport) or STRIPE_SECRET_KEY (REST fallback), never logged.
 """
 
 from __future__ import annotations
@@ -30,12 +33,17 @@ SANDBOX_HOST = "api-sandbox.asaas.com"
 PRODUCTION_BASE_URL = "https://api.asaas.com/v3"
 PRODUCTION_HOST = "api.asaas.com"
 P0_ITEMS = [f"AC{i}" for i in range(1, 11)]
+STRIPE_MCP_URL = "https://mcp.stripe.com"
+STRIPE_API_BASE = "https://api.stripe.com"
+STRIPE_HOSTS = ("mcp.stripe.com", "api.stripe.com")
+RailKind = Literal["asaas", "simulated", "stripe"]
+StripeTransportKind = Literal["mcp", "rest"]
 
 
 @dataclass(frozen=True)
 class Settings:
     env: Literal["sandbox", "production"]
-    rail: Literal["asaas", "simulated"]
+    rail: RailKind
     base_url: str
     api_key: str | None = field(repr=False)
     root: Path
@@ -46,6 +54,13 @@ class Settings:
     run_id: str
     prod_allowed_pix_key: str | None = field(default=None, repr=False)
     prod_allowed_pix_key_type: str | None = None
+    stripe_transport: StripeTransportKind = "mcp"
+    stripe_agent_key: str | None = field(default=None, repr=False)
+    stripe_secret_key: str | None = field(default=None, repr=False)
+    stripe_mcp_url: str = STRIPE_MCP_URL
+    stripe_api_base: str = STRIPE_API_BASE
+    # Treasury financial account to pay from (fa_...), when send_money needs one. Optional.
+    stripe_financial_account: str | None = None
 
 
 def find_dotenv(name: str = ".env", start: Path | None = None) -> Path | None:
@@ -87,6 +102,33 @@ def assert_sandbox_url(url: str) -> None:
         raise ATLError(PRODUCTION_BLOCKED, f"non-sandbox host refused: {host}")
 
 
+def assert_stripe_url(url: str) -> None:
+    host = urlparse(url).hostname or ""
+    if urlparse(url).scheme != "https" or host not in STRIPE_HOSTS:
+        raise ATLError(PRODUCTION_BLOCKED, f"non-Stripe host refused: {host}")
+
+
+def assert_stripe_test_key(key: str | None, what: str = "Stripe key") -> None:
+    """Refuse a live or unrecognized Stripe key. The key itself never appears in the message."""
+    if not key:
+        return
+    if "_live_" in key:
+        raise ATLError(PRODUCTION_BLOCKED, f"{what} is a live-mode key; the Stripe rail is sandbox only")
+    if "_test_" not in key:
+        raise ATLError(
+            PRODUCTION_BLOCKED, f"{what} is not a recognizable test-mode key (expected *_test_*); refused"
+        )
+
+
+def _rail_kind(value: str) -> RailKind:
+    v = value.strip().lower()
+    if v == "simulated":
+        return "simulated"
+    if v in ("stripe", "stripe_sandbox"):
+        return "stripe"
+    return "asaas"
+
+
 def load_settings(*, stdin_isatty: bool | None = None) -> Settings:
     env = os.environ.get("ATL_ENV", "sandbox").strip().lower() or "sandbox"
     if env not in ("sandbox", "production"):
@@ -94,7 +136,7 @@ def load_settings(*, stdin_isatty: bool | None = None) -> Settings:
     root = REPO_ROOT
     var_dir = Path(os.environ.get("ATL_VAR_DIR") or root / "var")
     runs_dir = Path(os.environ.get("ATL_RUNS_DIR") or root / "runs")
-    rail: Literal["asaas", "simulated"] = (
+    rail: RailKind = (
         "simulated" if os.environ.get("ATL_RAIL", "").lower() == "simulated" else "asaas"
     )
     prod_key = prod_key_type = None
@@ -115,6 +157,23 @@ def load_settings(*, stdin_isatty: bool | None = None) -> Settings:
         ).rstrip("/")
         assert_sandbox_url(base_url)
 
+    stripe: dict = {}
+    if rail == "stripe":
+        def pick(name: str) -> str | None:
+            return os.environ.get(name) or values.get(name) or None
+
+        transport = (pick("ATL_STRIPE_TRANSPORT") or "mcp").strip().lower()
+        if transport not in ("mcp", "rest"):
+            raise ATLError(PRODUCTION_BLOCKED, f"unknown ATL_STRIPE_TRANSPORT {transport!r}")
+        stripe = dict(
+            stripe_transport=transport,
+            stripe_agent_key=pick("STRIPE_AGENT_KEY"),
+            stripe_secret_key=pick("STRIPE_SECRET_KEY"),
+            stripe_financial_account=pick("STRIPE_FINANCIAL_ACCOUNT"),
+        )
+        assert_stripe_test_key(stripe["stripe_agent_key"], "STRIPE_AGENT_KEY")
+        assert_stripe_test_key(stripe["stripe_secret_key"], "STRIPE_SECRET_KEY")
+
     return Settings(
         env=env,  # type: ignore[arg-type]
         rail=rail,
@@ -128,4 +187,5 @@ def load_settings(*, stdin_isatty: bool | None = None) -> Settings:
         run_id=os.environ.get("ATL_RUN_ID") or "run_adhoc",
         prod_allowed_pix_key=prod_key,
         prod_allowed_pix_key_type=prod_key_type,
+        **stripe,
     )

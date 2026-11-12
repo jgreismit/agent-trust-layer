@@ -1,7 +1,7 @@
 """Redacting JSONL run logger. Owned by L0.
 
 Every external call and every tool call is one JSON line in runs/<run_id>.jsonl.
-Anything that looks like an Asaas key, and the value of any secret-named field, is masked.
+Anything that looks like an Asaas or Stripe key, and the value of any secret-named field, is masked.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 REDACTED = "[REDACTED]"
-_KEY_RE = re.compile(r"\$?aact_[A-Za-z0-9_\-.:=+/]+")
+_KEY_RE = re.compile(r"\$?aact_[A-Za-z0-9_\-.:=+/]+|\b(?:sk|rk|ak)_(?:test|live)_[A-Za-z0-9_]+")
 _SECRET_FIELD_RE = re.compile(
     r"(access_token|api_key|apikey|authorization|secret|password|private_key)", re.I
 )
