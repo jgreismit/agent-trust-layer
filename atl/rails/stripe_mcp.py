@@ -727,6 +727,16 @@ class StripeMCPRail:
     def recipients(self) -> dict[str, dict[str, Any]]:
         return self.state.snapshot()["recipients"]
 
+    def abandon_payment(self, idempotency_key: str) -> None:
+        """Owner gave up a held payment. The record stays (status abandoned) so the key is never resent."""
+        with self.state.locked() as state:
+            rec = state["payments"].get(idempotency_key)
+            if rec is None or rec["status"] != "pending_confirmation":
+                raise RailError(TRANSFER_NOT_FOUND, f"no held Stripe payment for {idempotency_key}")
+            rec["status"] = "abandoned"
+            rec["abandoned_at"] = _now_iso()
+        self._log("stripe_payment_abandoned", idempotency_key=idempotency_key)
+
     def pending_confirmations(self) -> list[dict[str, Any]]:
         return [
             r for r in self.state.snapshot()["payments"].values() if r["status"] == "pending_confirmation"

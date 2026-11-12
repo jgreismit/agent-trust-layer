@@ -9,6 +9,12 @@ Frozen commands:
         delegates to demo.runner.run_demo(sim=..., auto_approve_after=...) owned by L5,
         except --production-single which L4 implements in atl.approvals.production.
 
+Stripe rail (ATL_RAIL=stripe_sandbox), owner side only:
+    atl stripe setup-recipient PAYEE_ID --name NAME --email EMAIL [--mandate FILE]
+    atl stripe pending
+    atl stripe confirm DECISION_ID [--token APPROVAL_TOKEN]
+    atl stripe abandon DECISION_ID
+
 Every command calls load_settings first; an ATLError prints "CODE: message" on stderr and exits 2.
 """
 
@@ -27,8 +33,10 @@ from atl.contracts import ATLError
 app = typer.Typer(help="Agent Trust Layer", no_args_is_help=True)
 rail_app = typer.Typer(help="Read-only rail commands", no_args_is_help=True)
 mandate_app = typer.Typer(help="Mandate commands", no_args_is_help=True)
+stripe_app = typer.Typer(help="Stripe rail owner commands (ATL_RAIL=stripe_sandbox)", no_args_is_help=True)
 app.add_typer(rail_app, name="rail")
 app.add_typer(mandate_app, name="mandate")
+app.add_typer(stripe_app, name="stripe")
 
 EXIT_ATL_ERROR = 2
 
@@ -109,10 +117,14 @@ def rail_balance() -> None:
 
     def go(settings: Settings) -> None:
         from atl.approvals import format_brl
-        from atl.rails import get_rail
+        from atl.rails import get_rail, rail_currency
 
         rail = get_rail(settings)
-        typer.echo(f"{rail.name}: {format_brl(rail.balance_cents())}")
+        cents = rail.balance_cents()
+        if rail_currency(settings) == "USD":
+            typer.echo(f"{rail.name}: US$ {cents // 100}.{cents % 100:02d}")
+        else:
+            typer.echo(f"{rail.name}: {format_brl(cents)}")
 
     _run(go)
 
@@ -126,6 +138,95 @@ def mandate_register(file: Path) -> None:
         svc = _service(settings)
         out = svc.register_mandate(svc.sign_mandate(data))
         typer.echo(f"registered {out['mandate_id']}")
+        if settings.rail == "stripe" and settings.stripe_transport == "mcp":
+            known = {r.get("recipient_id") for r in svc.rail.recipients().values()}
+            for p in data.get("payees") or []:
+                rid = p.get("stripe_recipient_id")
+                if rid and rid not in known:
+                    typer.echo(
+                        f"note: {p.get('payee_id')} recipient {rid} was not set up through ATL "
+                        "(atl stripe setup-recipient); make sure it exists in the Stripe sandbox",
+                        err=True,
+                    )
+
+    _run(go)
+
+
+# ---------------------------------------------------------------------------------------------- stripe
+
+
+@stripe_app.command("setup-recipient")
+def stripe_setup_recipient(
+    payee_id: str,
+    name: str = typer.Option(..., "--name", help="Payee legal or display name."),
+    email: str = typer.Option(..., "--email", help="Payee contact email (Stripe may send it onboarding)."),
+    country: str = typer.Option("US", "--country"),
+    mandate: Path | None = typer.Option(
+        None, "--mandate", help="Mandate JSON file: write the recipient id into this payee's entry."
+    ),
+) -> None:
+    """Owner: set up a Stripe Treasury recipient (setup_recipient) and record its id in ATL's state."""
+
+    def go(settings: Settings) -> None:
+        rec = _service(settings).setup_stripe_recipient(payee_id, name, email, country)
+        typer.echo(f"recipient {rec['recipient_id']} set up for {payee_id}")
+        if rec.get("onboarding_url"):
+            typer.echo(f"payee onboarding link (send it to the payee): {rec['onboarding_url']}")
+        if mandate is not None:
+            data = json.loads(mandate.read_text(encoding="utf-8"))
+            hits = [p for p in data.get("payees") or [] if p.get("payee_id") == payee_id]
+            if not hits:
+                raise ATLError("INVALID_ARGUMENT", f"payee {payee_id} not in {mandate}")
+            hits[0]["stripe_recipient_id"] = rec["recipient_id"]
+            mandate.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+            typer.echo(f"wrote stripe_recipient_id into {mandate}; register it with atl mandate register")
+
+    _run(go)
+
+
+@stripe_app.command("pending")
+def stripe_pending() -> None:
+    """Owner: list payments Stripe holds for human confirmation, with their Dashboard URLs."""
+
+    def go(settings: Settings) -> None:
+        items = _service(settings).pending_rail_payments()
+        if not items:
+            typer.echo("no payment waits for Stripe confirmation")
+        for r in items:
+            typer.echo(
+                f"{r['idempotency_key']}  {r['amount_cents']} {r['currency']} cents -> {r['destination']}  "
+                f"approve: {r.get('confirmation_url') or '(no URL)'}"
+            )
+
+    _run(go)
+
+
+@stripe_app.command("confirm")
+def stripe_confirm(
+    decision_id: str,
+    token: str | None = typer.Option(None, "--token", help="Approval token Stripe showed after Approve."),
+) -> None:
+    """Owner: after approving in the Stripe Dashboard, retry the held payment. ATL never approves itself."""
+
+    def go(settings: Settings) -> None:
+        out = _service(settings).confirm_rail_payment(decision_id, token)
+        if out["status"] == "executed":
+            typer.echo(f"executed {decision_id}: {out['transfer_id']} (receipt {out['receipt_id']})")
+        else:
+            typer.echo(
+                f"still pending Stripe confirmation: approve at {out.get('confirmation_url') or '(no URL)'}"
+            )
+
+    _run(go)
+
+
+@stripe_app.command("abandon")
+def stripe_abandon(decision_id: str) -> None:
+    """Owner: give up a payment Stripe still holds (decision becomes expired; never sent)."""
+
+    def go(settings: Settings) -> None:
+        out = _service(settings).abandon_rail_payment(decision_id)
+        typer.echo(f"abandoned {decision_id} (receipt {out['receipt_id']})")
 
     _run(go)
 

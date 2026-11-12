@@ -27,7 +27,14 @@ except ImportError:  # mcp 1.x
 from atl.config import load_settings
 from atl.contracts import ATLError
 from atl.runlog import RunLog, Timer
-from atl.service import MAX_WAIT_SECONDS, POLL_SECONDS, ATLService, error_result, log_tool_call
+from atl.service import (
+    MAX_WAIT_SECONDS,
+    POLL_SECONDS,
+    WAITING_STATUSES,
+    ATLService,
+    error_result,
+    log_tool_call,
+)
 
 TOOL_NAMES = (
     "register_mandate",
@@ -79,6 +86,8 @@ def build_server(get_service: Callable[[], ATLService], runlog: RunLog | None = 
         description=(
             "ALWAYS call this first, before any payment. Submit the invoice as a payment intent "
             "(amount in integer cents, the Pix key you intend to pay, the invoice memo copied verbatim). "
+            "US payees (USD): leave pix_key empty and pass the payment destination printed on the invoice "
+            "as destination, and currency USD. "
             "Returns decision_id, verdict (approve, escalate, refuse), rule_hits, reasons and next_action. "
             "Follow next_action exactly: call_execute_payment -> call execute_payment with decision_id; "
             "wait_for_owner -> poll get_decision; do_not_pay_report_to_owner -> do not pay, report the "
@@ -89,12 +98,14 @@ def build_server(get_service: Callable[[], ATLService], runlog: RunLog | None = 
         mandate_id: str,
         agent_id: str,
         payee_id: str,
-        pix_key: str,
         amount_cents: int,
         category: str,
         invoice_ref: str,
         memo: str,
         idempotency_key: str,
+        pix_key: str = "",
+        destination: str | None = None,
+        currency: str | None = None,
     ) -> dict:
         args = dict(
             mandate_id=mandate_id,
@@ -107,6 +118,10 @@ def build_server(get_service: Callable[[], ATLService], runlog: RunLog | None = 
             memo=memo,
             idempotency_key=idempotency_key,
         )
+        if destination is not None:
+            args["destination"] = destination
+        if currency is not None:
+            args["currency"] = currency
         return await call("pay_check", args, lambda s: s.pay_check(**args))
 
     @server.tool(
@@ -122,7 +137,7 @@ def build_server(get_service: Callable[[], ATLService], runlog: RunLog | None = 
             wait = max(0, min(int(wait_seconds or 0), MAX_WAIT_SECONDS))
             deadline = time.monotonic() + wait
             result = s.get_decision(decision_id)
-            while result["status"] == "pending_owner" and time.monotonic() < deadline:
+            while result["status"] in WAITING_STATUSES and time.monotonic() < deadline:
                 await anyio.sleep(min(POLL_SECONDS, max(0.0, deadline - time.monotonic())))
                 result = s.get_decision(decision_id)
             return result
@@ -134,8 +149,10 @@ def build_server(get_service: Callable[[], ATLService], runlog: RunLog | None = 
     @server.tool(
         description=(
             "Pay an approved decision. Only works when next_action is call_execute_payment. Pays exactly "
-            "the registered payee key and the checked amount. Safe to call again: a second call returns "
-            "the same transfer_id and receipt_id. Fails with DECISION_NOT_APPROVED otherwise."
+            "the registered payee destination and the checked amount. Safe to call again: a second call "
+            "returns the same transfer_id and receipt_id. Fails with DECISION_NOT_APPROVED otherwise. "
+            "Status pending_rail_confirmation means the rail holds the payment for the owner: do not retry, "
+            "poll get_decision."
         )
     )
     async def execute_payment(decision_id: str) -> dict:

@@ -5,8 +5,11 @@ Public API (frozen; every method returns JSON-safe dicts; errors raise atl.contr
     sign_mandate(mandate: dict) -> dict          # owner action: fills `signature` with the owner key
     register_mandate(mandate: dict) -> {"mandate_id"}
     pay_check(*, mandate_id, agent_id, payee_id, pix_key, amount_cents, category, invoice_ref, memo,
-              idempotency_key) -> {"decision_id", "verdict", "status", "rule_hits", "reasons",
-                                   "next_action", "receipt_id", "original_decision_id"}
+              idempotency_key, destination=None, currency=None)
+        -> {"decision_id", "verdict", "status", "rule_hits", "reasons", "next_action", "receipt_id",
+            "original_decision_id"}
+        destination / currency (Stripe rail): the Stripe recipient the agent intends to pay and the
+        currency it believes it pays in. A mandate currency the configured rail does not pay is refused (R11).
     get_decision(decision_id, wait_seconds: int = 0) -> {"decision_id", "verdict", "status", "rule_hits",
                                   "reasons", "next_action", "transfer_id", "receipt_id"}
         wait_seconds (capped at 30) blocks while the status is pending_owner, so an agent without a
@@ -18,6 +21,14 @@ Public API (frozen; every method returns JSON-safe dicts; errors raise atl.contr
     approve(decision_id) -> decision dict ; refuse(decision_id) -> decision dict
     revoke(mandate_id) -> {"mandate_id", "revoked": True}
     owner_public_key -> str (hex) ; atl_public_key -> str (hex)
+
+Stripe rail (owner side, never exposed to the agent):
+    execute_payment may return status "pending_rail_confirmation" when Stripe holds the payment for its
+    human confirmation; the Dashboard URL goes to the owner (output_fn and run log), not to the agent.
+    confirm_rail_payment(decision_id, approval_token=None) -> executed view, or the still pending view
+    abandon_rail_payment(decision_id) -> decision dict (status expired; nothing was paid)
+    pending_rail_payments() -> list of held payments with their confirmation URLs
+    setup_stripe_recipient(payee_id, display_name, email, country="US") -> recipient record
 
 Every status change (expiry, approval, execution) runs under a reentrant lock that combines a thread lock
 with an fcntl file lock in var/locks, so two processes cannot execute the same decision twice.
@@ -54,9 +65,13 @@ from atl.contracts import (
     ESCALATION_TTL_SECONDS,
     MANDATE_BAD_SIGNATURE,
     MANDATE_NOT_FOUND,
+    PENDING_RAIL_CONFIRMATION,
     PRODUCTION_BLOCKED,
     PRODUCTION_CAP_EXCEEDED,
+    R1_MANDATE_INVALID,
+    R11_CURRENCY_MISMATCH,
     R_PROD_DESTINATION_NOT_ALLOWED,
+    RAIL_CURRENCY,
     RECEIPT_NOT_FOUND,
     ATLError,
     Decision,
@@ -87,7 +102,9 @@ NEXT_ACTION_BY_STATUS = {
     "refused": "do_not_pay_report_to_owner",
     "expired": "do_not_pay_report_to_owner",
     "executed": "already_executed",
+    "pending_rail_confirmation": "wait_for_owner",
 }
+WAITING_STATUSES = ("pending_owner", "pending_rail_confirmation")
 _SUMMARY_KEYS = ("decision_id", "verdict", "status", "rule_hits", "transfer_id", "receipt_id", "error")
 
 
@@ -298,6 +315,8 @@ class ATLService:
         invoice_ref: str,
         memo: str,
         idempotency_key: str,
+        destination: str | None = None,
+        currency: str | None = None,
     ) -> dict:
         intent = PaymentIntent(
             intent_id=new_id("int"),
@@ -310,11 +329,14 @@ class ATLService:
             invoice_ref=invoice_ref,
             memo=memo,
             idempotency_key=idempotency_key,
+            destination=destination,
+            currency=currency,
         )
         mandate = self.store.get_mandate(mandate_id)
         decision = self.evaluate_fn(
             intent, mandate, self.store, self.now_fn(), owner_public_key=self.owner_public_key
         )
+        decision = self._rail_currency_check(decision, mandate)
         if self.production_guards and pix_key != self.prod_allowed_pix_key:
             decision = decision.model_copy(
                 update={
@@ -340,6 +362,25 @@ class ATLService:
             "receipt_id": receipt.receipt_id,
             "original_decision_id": decision.original_decision_id,
         }
+
+    def _rail_currency_check(self, decision: Decision, mandate: Mandate | None) -> Decision:
+        """Refuse (R11) a mandate whose currency the configured rail does not pay. No rail is built here."""
+        from atl.rails import rail_currency
+
+        if mandate is None or R1_MANDATE_INVALID in decision.rule_hits:
+            return decision
+        rail_cur = rail_currency(self.settings)
+        if mandate.currency == rail_cur:
+            return decision
+        reason = f"Mandate currency {mandate.currency} is not paid by the configured rail ({rail_cur} only)"
+        return decision.model_copy(
+            update={
+                "verdict": "refuse",
+                "status": "refused",
+                "rule_hits": [*decision.rule_hits, R11_CURRENCY_MISMATCH],
+                "reasons": [*decision.reasons, reason],
+            }
+        )
 
     def _load(self, decision_id: str) -> Decision:
         decision = self.store.get_decision(decision_id)
@@ -381,7 +422,7 @@ class ATLService:
         wait = max(0, min(int(wait_seconds or 0), MAX_WAIT_SECONDS))
         deadline = time.monotonic() + wait
         decision = self._refresh(decision_id)
-        while decision.status == "pending_owner" and time.monotonic() < deadline:
+        while decision.status in WAITING_STATUSES and time.monotonic() < deadline:
             self.sleep_fn(min(POLL_SECONDS, max(0.0, deadline - time.monotonic())))
             decision = self._refresh(decision_id)
         return self._decision_view(decision)
@@ -488,10 +529,69 @@ class ATLService:
             raise ATLError(PRODUCTION_BLOCKED, "owner did not type PAY; no payment was made")
         self._log("production_confirmation", confirmed=True)
 
+    def _pending_view(self, decision_id: str) -> dict:
+        """Agent-facing view of a payment the rail holds. The confirmation URL is for the owner only."""
+        transfer = self.store.get_transfer_for_decision(decision_id)
+        receipt = self._latest_receipt(decision_id, with_transfer=True)
+        return {
+            "decision_id": decision_id,
+            "status": "pending_rail_confirmation",
+            "transfer_id": transfer.transfer_id if transfer else None,
+            "receipt_id": receipt.receipt_id if receipt else None,
+            "rail": transfer.rail if transfer else None,
+            "amount_cents": transfer.amount_cents if transfer else None,
+            "rail_status": transfer.status if transfer else None,
+            "next_action": "wait_for_owner",
+            "message": "The rail holds this payment for the account owner's confirmation. Do not retry; "
+            "the owner confirms it, then get_decision shows executed.",
+        }
+
+    def _notify_rail_confirmation(self, decision_id: str, transfer: RailTransfer) -> None:
+        url = transfer.confirmation_url or "(Stripe returned no URL; open the Dashboard approvals page)"
+        self._log(
+            "rail_confirmation_required",
+            decision_id=decision_id,
+            transfer_id=transfer.transfer_id,
+            confirmation_url=transfer.confirmation_url,
+        )
+        self.output_fn(
+            f"Stripe holds payment {decision_id} ({transfer.amount_cents} {transfer.currency} cents to "
+            f"{transfer.destination}) for your confirmation.\n"
+            f"  1. Approve it in the Stripe Dashboard: {url}\n"
+            f"  2. Then run: atl stripe confirm {decision_id} [--token APPROVAL_TOKEN]"
+        )
+
+    def _pay(self, decision_id: str, intent: PaymentIntent, mandate: Mandate, payee: Any) -> RailTransfer:
+        if payee.destination_kind == "pix":
+            return self.rail.transfer_pix(
+                pix_key=payee.pix_key,
+                pix_key_type=payee.pix_key_type,
+                amount_cents=intent.amount_cents,
+                idempotency_key=decision_id,
+                description=f"ATL {intent.invoice_ref}",
+            )
+        pay = getattr(self.rail, "pay_destination", None)
+        if pay is None:
+            raise ATLError(DECISION_NOT_APPROVED, f"rail {self.rail.name} cannot pay Stripe destinations")
+        return pay(
+            payee=payee,
+            amount_cents=intent.amount_cents,
+            currency=mandate.currency,
+            idempotency_key=decision_id,
+            description=f"ATL {intent.invoice_ref[:80]} {decision_id}",
+            metadata={
+                "atl_decision_id": decision_id,
+                "atl_intent_id": intent.intent_id,
+                "atl_invoice_ref": intent.invoice_ref[:200],
+            },
+        )
+
     def execute_payment(self, decision_id: str) -> dict:
         decision = self._refresh(decision_id)
         if decision.status == "executed":
             return self._executed_view(decision_id)
+        if decision.status == "pending_rail_confirmation":
+            return self._pending_view(decision_id)
         if decision.status != "approved":
             raise self._not_approved(decision)
 
@@ -502,8 +602,20 @@ class ATLService:
         if mandate.revoked:
             raise self._not_approved(decision.model_copy(update={"status": "refused"}))
         payee = next((p for p in mandate.payees if p.payee_id == intent.payee_id), None)
-        if payee is None or payee.pix_key != intent.pix_key or intent.amount_cents <= 0:
+        if payee is None or intent.amount_cents <= 0:
             raise ATLError(DECISION_NOT_APPROVED, "intent key or amount does not match the mandate payee")
+        if payee.destination_kind == "pix":
+            if payee.pix_key != intent.pix_key:
+                raise ATLError(DECISION_NOT_APPROVED, "intent key or amount does not match the mandate payee")
+        elif intent.requested_destination.strip() not in payee.destinations():
+            raise ATLError(DECISION_NOT_APPROVED, "intent destination does not match the mandate payee")
+        rail_cur = RAIL_CURRENCY.get(self.rail.name, "BRL")
+        if mandate.currency != rail_cur or intent.currency not in (None, mandate.currency):
+            raise ATLError(
+                DECISION_NOT_APPROVED,
+                f"mandate currency {mandate.currency} does not match rail {self.rail.name} ({rail_cur}); "
+                "no payment was made",
+            )
 
         if self.production_guards:
             self._production_checks(intent, payee.display_name, payee.pix_key)
@@ -514,16 +626,18 @@ class ATLService:
             decision = self._refresh(decision_id)
             if decision.status == "executed":
                 return self._executed_view(decision_id)
+            if decision.status == "pending_rail_confirmation":
+                return self._pending_view(decision_id)
             if decision.status != "approved":
                 raise self._not_approved(decision)
-            transfer: RailTransfer = self.rail.transfer_pix(
-                pix_key=payee.pix_key,
-                pix_key_type=payee.pix_key_type,
-                amount_cents=intent.amount_cents,
-                idempotency_key=decision_id,
-                description=f"ATL {intent.invoice_ref}",
-            )
+            transfer: RailTransfer = self._pay(decision_id, intent, mandate, payee)
             self.store.save_transfer(decision_id, transfer)
+            if transfer.status == PENDING_RAIL_CONFIRMATION:
+                self.store.update_decision_status(decision_id, "pending_rail_confirmation")
+                held = decision.model_copy(update={"status": "pending_rail_confirmation"})
+                self.chain.append(held, intent, transfer)
+                self._notify_rail_confirmation(decision_id, transfer)
+                return self._pending_view(decision_id)
             self.store.update_decision_status(decision_id, "executed")
             executed = decision.model_copy(update={"status": "executed"})
             receipt = self.chain.append(executed, intent, transfer)
@@ -537,6 +651,82 @@ class ATLService:
             # PENDING on Asaas: the owner still has to authorize the transfer with the critical-action token.
             "rail_status": transfer.status,
         }
+
+    # ------------------------------------------------------- rail confirmation (owner)
+
+    def confirm_rail_payment(self, decision_id: str, approval_token: str | None = None) -> dict:
+        """Owner action after approving the held payment in the Stripe Dashboard: retry it through the rail.
+        The decision becomes executed only when Stripe now reports the payment; otherwise it stays pending."""
+        with self._lock.hold():
+            decision = self._load(decision_id)
+            if decision.status == "executed":
+                return self._executed_view(decision_id)
+            if decision.status != "pending_rail_confirmation":
+                raise ATLError(
+                    DECISION_NOT_APPROVED, f"decision is {decision.status}, not pending rail confirmation"
+                )
+            intent = self._intent_for(decision)
+            mandate = self.store.get_mandate(intent.mandate_id)
+            if mandate is None or mandate.revoked:
+                raise ATLError(DECISION_NOT_APPROVED, "mandate is revoked or missing; not confirming")
+            confirm = getattr(self.rail, "confirm_payment", None)
+            if confirm is None:
+                raise ATLError(DECISION_NOT_APPROVED, f"rail {self.rail.name} has no confirmation step")
+            transfer: RailTransfer = confirm(decision_id, approval_token)
+            self.store.save_transfer(decision_id, transfer)
+            if transfer.status == PENDING_RAIL_CONFIRMATION:
+                self._log("rail_confirmation_still_pending", decision_id=decision_id)
+                out = self._pending_view(decision_id)
+                out["confirmation_url"] = transfer.confirmation_url  # owner-facing call
+                return out
+            self.store.update_decision_status(decision_id, "executed")
+            executed = decision.model_copy(update={"status": "executed"})
+            receipt = self.chain.append(executed, intent, transfer)
+            self._log("rail_confirmation_done", decision_id=decision_id, transfer_id=transfer.transfer_id)
+        return {
+            "decision_id": decision_id,
+            "status": "executed",
+            "transfer_id": transfer.transfer_id,
+            "receipt_id": receipt.receipt_id,
+            "rail": transfer.rail,
+            "amount_cents": transfer.amount_cents,
+            "rail_status": transfer.status,
+        }
+
+    def abandon_rail_payment(self, decision_id: str) -> dict:
+        """Owner action: give up a payment the rail still holds (for example the 24 h Stripe approval
+        expired). Marks the decision expired; ATL will not send it again."""
+        with self._lock.hold():
+            decision = self._load(decision_id)
+            if decision.status != "pending_rail_confirmation":
+                raise ATLError(
+                    DECISION_NOT_APPROVED, f"decision is {decision.status}, not pending rail confirmation"
+                )
+            abandon = getattr(self.rail, "abandon_payment", None)
+            if abandon is not None:
+                abandon(decision_id)
+            intent = self._intent_for(decision)
+            self.store.update_decision_status(decision_id, "expired")
+            expired = decision.model_copy(update={"status": "expired"})
+            receipt = self.chain.append(expired, intent, self.store.get_transfer_for_decision(decision_id))
+            self._log("rail_confirmation_abandoned", decision_id=decision_id)
+        out = expired.model_dump(mode="json")
+        out["receipt_id"] = receipt.receipt_id
+        return out
+
+    def pending_rail_payments(self) -> list[dict]:
+        pending = getattr(self.rail, "pending_confirmations", None)
+        return list(pending()) if pending is not None else []
+
+    def setup_stripe_recipient(
+        self, payee_id: str, display_name: str, email: str, country: str = "US"
+    ) -> dict:
+        setup = getattr(self.rail, "setup_recipient", None)
+        if setup is None:
+            raise ATLError(INVALID_ARGUMENT, f"rail {self.rail.name} does not set up Stripe recipients")
+        rec = setup(payee_id=payee_id, display_name=display_name, email=email, country=country)
+        self._log("owner_stripe_recipient", payee_id=payee_id, recipient_id=rec.get("recipient_id"))
+        return rec
 
     # ---------------------------------------------------------------- receipts
 
