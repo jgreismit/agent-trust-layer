@@ -1,7 +1,7 @@
 """MCP server `atl` over stdio (lane L4).
 
 Run: uv run python -m atl.mcp_server
-Tools: register_mandate, pay_check, get_decision, execute_payment, get_receipt, verify_receipt
+Tools: register_mandate, get_mandate, pay_check, get_decision, execute_payment, get_receipt, verify_receipt
 
 stdout is the MCP protocol channel: nothing in this module prints to it. Diagnostics go to stderr and
 every tool call writes one `tool_call` line to runs/<run_id>.jsonl.
@@ -38,6 +38,7 @@ from atl.service import (
 
 TOOL_NAMES = (
     "register_mandate",
+    "get_mandate",
     "pay_check",
     "get_decision",
     "execute_payment",
@@ -46,7 +47,8 @@ TOOL_NAMES = (
 )
 
 INSTRUCTIONS = (
-    "Agent Trust Layer: every payment goes through pay_check first. Follow next_action exactly. "
+    "Agent Trust Layer: call get_mandate to find the payee_id, destination and category, then submit every "
+    "payment to pay_check before any money moves. Follow next_action exactly. "
     "Never retry a refused payment; report the reasons to the owner."
 )
 
@@ -84,7 +86,19 @@ def build_server(get_service: Callable[[], ATLService], runlog: RunLog | None = 
 
     @server.tool(
         description=(
-            "ALWAYS call this first, before any payment. Submit the invoice as a payment intent "
+            "Read-only. Call this before pay_check to see the mandate you pay under: the registered payees "
+            "(payee_id, display name, exact Pix key or destination, allowed categories), the currency, the "
+            "caps and how much of today's cap is left. Use the payee_id, destination and category exactly as "
+            "listed. If the invoice's payee or destination is not listed, do not pay: report it to the owner."
+        )
+    )
+    async def get_mandate(mandate_id: str, agent_id: str) -> dict:
+        args = {"mandate_id": mandate_id, "agent_id": agent_id}
+        return await call("get_mandate", args, lambda s: s.get_mandate(mandate_id, agent_id))
+
+    @server.tool(
+        description=(
+            "Submit every payment here (after get_mandate), before any money moves. Submit the invoice as a payment intent "
             "(amount in integer cents, the Pix key you intend to pay, the invoice memo copied verbatim). "
             "US payees (USD): leave pix_key empty and pass the payment destination printed on the invoice "
             "as destination, and currency USD. "

@@ -21,16 +21,18 @@ def _payload(result) -> dict:
     return json.loads(result.content[0].text)
 
 
-async def test_lists_exactly_six_tools(tmp_path):
+async def test_lists_exactly_seven_tools(tmp_path):
     h = Harness(tmp_path)
     server = build_server(lambda: h.svc, h.runlog)
     async with Client(server) as client:
         tools = (await client.list_tools()).tools
     names = sorted(t.name for t in tools)
-    assert names == sorted(TOOL_NAMES)
+    assert names == sorted(TOOL_NAMES) and len(names) == 7
     by_name = {t.name: t for t in tools}
     desc = by_name["pay_check"].description.lower()
-    assert "always call this first" in desc and "next_action" in desc and "never retry" in desc
+    assert "before any money moves" in desc and "next_action" in desc and "never retry" in desc
+    mandate_desc = by_name["get_mandate"].description.lower()
+    assert "read-only" in mandate_desc and "before pay_check" in mandate_desc
     props = by_name["pay_check"].input_schema["properties"]
     assert props["amount_cents"]["type"] == "integer"
     assert "wait_seconds" in by_name["get_decision"].input_schema["properties"]

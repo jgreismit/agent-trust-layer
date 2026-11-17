@@ -294,6 +294,52 @@ class ATLService:
         self.store.save_mandate(m)
         return {"mandate_id": m.mandate_id}
 
+    def get_mandate(self, mandate_id: str, agent_id: str) -> dict:
+        """Agent-safe, read-only view of the mandate the agent pays under (HW9 usability fix).
+
+        Lets an agent map an invoice to the exact payee_id, destination and category before pay_check,
+        instead of guessing them. A mandate that does not exist, or belongs to another agent, answers
+        MANDATE_NOT_FOUND in both cases so the tool does not reveal other agents' mandates. Nothing here
+        can change a mandate or move money.
+        """
+        from atl.policy import _COUNTS_FOR_DAY, _day_start
+
+        mandate = self.store.get_mandate(mandate_id)
+        if mandate is None or mandate.agent_id != agent_id:
+            raise ATLError(MANDATE_NOT_FOUND, f"no mandate {mandate_id} for agent {agent_id}")
+        now = self.now_fn()
+        spent_today = sum(
+            i.amount_cents
+            for i, d in self.store.decisions_since(mandate.mandate_id, _day_start(now, mandate.currency))
+            if d.status in _COUNTS_FOR_DAY
+        )
+        payees = []
+        for p in mandate.payees:
+            view = {"payee_id": p.payee_id, "display_name": p.display_name, "categories": list(p.categories)}
+            if p.destination_kind == "pix":
+                view.update(pix_key=p.pix_key, pix_key_type=p.pix_key_type)
+            else:
+                view["destinations"] = p.destinations()
+            payees.append(view)
+        return {
+            "mandate_id": mandate.mandate_id,
+            "agent_id": mandate.agent_id,
+            "currency": mandate.currency,
+            "valid_until": mandate.valid_until.isoformat() if mandate.valid_until else None,
+            "revoked": mandate.revoked,
+            "per_payment_cap_cents": mandate.per_payment_cap_cents,
+            "daily_cap_cents": mandate.daily_cap_cents,
+            "hard_cap_cents": mandate.hard_cap_cents,
+            "spent_today_cents": spent_today,
+            "remaining_today_cents": max(0, mandate.daily_cap_cents - spent_today),
+            "payees": payees,
+            "how_to_use": (
+                "Match the invoice's payee to one payee here and pass its payee_id, its exact destination "
+                "(pix_key) and one of its categories to pay_check. If the invoice's payee or destination "
+                "is not listed, do not pay: report it to the owner."
+            ),
+        }
+
     def revoke(self, mandate_id: str) -> dict:
         if self.store.get_mandate(mandate_id) is None:
             raise ATLError(MANDATE_NOT_FOUND, mandate_id)
