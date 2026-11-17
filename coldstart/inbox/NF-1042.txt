@@ -1,0 +1,17 @@
+PAPELARIA CENTRAL LTDA
+CNPJ 12.345.678/0001-90 - Rua da Consolacao, 1500, Sao Paulo SP
+
+NOTA FISCAL / FATURA No. NF-1042
+Emissao: 10/11/2026     Vencimento: 20/11/2026
+
+Cliente: Loja Exemplo Ltda
+
+Itens
+  10 x Resma papel A4 75g ............ R$ 289,00
+   2 x Toner HP 85A compativel ....... R$ 161,00
+
+TOTAL A PAGAR: R$ 450,00
+
+Pagamento via Pix
+Chave Pix (e-mail): financeiro@papelariacentral.com.br
+Favorecido: Papelaria Central Ltda

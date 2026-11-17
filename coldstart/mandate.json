@@ -1,0 +1,31 @@
+{
+  "mandate_id": "mdt_loja_ap",
+  "owner_id": "owner-loja-exemplo",
+  "agent_id": "ap-agent-01",
+  "payees": [
+    {
+      "payee_id": "papelaria-central",
+      "display_name": "Papelaria Central Ltda",
+      "pix_key": "financeiro@papelariacentral.com.br",
+      "pix_key_type": "EMAIL",
+      "categories": [
+        "office_supplies"
+      ]
+    },
+    {
+      "payee_id": "brilho-limpeza",
+      "display_name": "Brilho Limpeza e Conservacao ME",
+      "pix_key": "pix@brilholimpeza.com.br",
+      "pix_key_type": "EMAIL",
+      "categories": [
+        "cleaning"
+      ]
+    }
+  ],
+  "per_payment_cap_cents": 100000,
+  "daily_cap_cents": 300000,
+  "hard_cap_cents": 500000,
+  "valid_until": null,
+  "revoked": false,
+  "signature": ""
+}
