@@ -36,3 +36,35 @@ is approved; another agent's mandate is not visible; the view changes nothing).
 
 **Not proven yet:** other models and other builders' agents; escalation (`wait_for_owner`) with a live
 owner; the US rail (Stripe) beyond offline tests; many invoices in one run.
+
+## Independent test and the waiting fix (2026-11-17 and 18)
+
+**Independent run.** Another builder (Shahaleel Al Yousef, TrueMenu) ran her own Claude Code agent (Opus 5.5,
+interactive, auto mode) against tag `hw8` with only `docs/AGENT_GUIDE.md` and the task in
+`bakery/task.txt`; Marlon wrote the scenario and `bakery/PRE_RUN_CHECK.md` before her run. All three
+outcomes matched the check (FF-1042 paid and verified; ESP-559 escalated by R6, approved by the owner, paid
+and verified; FF-1043 refused by R3, R4 and R8 and not resubmitted). It took three interventions: the owner's
+approval (the owner's normal role), a nudge after the agent **ended its turn about 2 minutes into a
+15-minute escalation**, and allowing `execute_payment` after Claude Code's auto mode blocked it. Her raw
+transcript and log stay with the team (not published here).
+
+**Fix.** Every decision now carries `next_step` (one plain instruction) and an escalation carries
+`expires_at`; the guide says not to end the turn while waiting, that an approved decision does not expire,
+that only the agent executes, and how to allow `execute_payment` in the host. Also: a missing `ATL_RAIL`
+now means the simulated rail and an unknown value is refused (`CONFIG_INVALID`). Regression tests:
+`tests/service/test_wait_and_rail_default.py`.
+
+**Rerun** (`run_bakery.sh`, checks in `bakery/RERUN_CHECK.md` written before): same scenario, fresh
+`claude -p` session, Opus 5.5, `execute_payment` pre-allowed, a scripted owner applying the tester's owner
+rule after a delay, no messages to the agent. Evidence in `evidence/bakery/`.
+
+| Owner answers after | Before (tag `hw8` + tester's guide) | After (`hw9-usability` + new guide) |
+|---|---|---|
+| 3 min | waited (5 polls), paid ESP-559, verified | waited (5 polls), paid ESP-559, verified |
+| 8 min, run 1 | **stopped after 4 polls (~2 min), ESP-559 left "waiting for you"** | waited (14 polls), paid ESP-559, verified |
+| 8 min, run 2 | **stopped after 5 polls (~2.5 min), ESP-559 left unpaid** | waited (14 polls), paid ESP-559, verified |
+
+```bash
+coldstart/run_bakery.sh <checkout of tag hw8> <hw8 AGENT_GUIDE.md> claude-opus-5-5 480   # before
+coldstart/run_bakery.sh . docs/AGENT_GUIDE.md claude-opus-5-5 480                          # after
+```

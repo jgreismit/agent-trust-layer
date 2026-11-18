@@ -1,0 +1,25 @@
+{
+  "mandate_id": "mdt_bakery_test",
+  "owner_id": "owner_test",
+  "agent_id": "bakery-payables-agent",
+  "payees": [
+    {
+      "payee_id": "fresh-farms",
+      "display_name": "Fresh Farms Hortifruti",
+      "pix_key": "financeiro@freshfarms.example",
+      "pix_key_type": "EMAIL",
+      "categories": ["produce"]
+    },
+    {
+      "payee_id": "embala-sp",
+      "display_name": "EmbalaSP",
+      "pix_key": "cobranca@embalasp.example",
+      "pix_key_type": "EMAIL",
+      "categories": ["packaging"]
+    }
+  ],
+  "per_payment_cap_cents": 10000,
+  "daily_cap_cents": 25000,
+  "hard_cap_cents": 30000,
+  "valid_until": "2026-11-30T23:59:00Z"
+}
