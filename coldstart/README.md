@@ -3,7 +3,7 @@
 Question: can an agent that was never configured around our demo use ATL from its documentation alone?
 
 **Setup.** A fresh Claude Code session (`claude -p`, Sonnet 5.5, no memory, no project settings, only the
-`atl` MCP server) gets `docs/agent-guide.md`, an invoice in `inbox/` and a one-paragraph task
+`atl` MCP server) gets `docs/AGENT_GUIDE.md`, an invoice in `inbox/` and a one-paragraph task
 (`task-*.md`): an agent id, a mandate id, "pay this invoice and write a confirmation for finance". No call
 sequence, no expected answer, no messages from us during the run. Tools: read and write files and the ATL
 tools; no shell, no web. Rail: ATL's simulated Pix rail (no money, no keys). The owner side (signing the

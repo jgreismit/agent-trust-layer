@@ -21,6 +21,7 @@ from urllib.parse import urlparse
 from dotenv import dotenv_values
 
 from atl.contracts import (
+    CONFIG_INVALID,
     PRODUCTION_BLOCKED,
     PROMOTION_BLOCKED_ACCEPTANCE,
     PROMOTION_REQUIRES_HUMAN,
@@ -121,12 +122,19 @@ def assert_stripe_test_key(key: str | None, what: str = "Stripe key") -> None:
 
 
 def _rail_kind(value: str) -> RailKind:
+    """Fail safe (HW9 tester finding): no ATL_RAIL means the simulated rail, and an unknown value is an error.
+
+    Before, anything that was not "simulated" or "stripe" (including a missing variable or a typo) selected
+    the Asaas rail. A payment guard must never reach a real rail by default: Asaas now needs ATL_RAIL=asaas.
+    """
     v = value.strip().lower()
-    if v == "simulated":
+    if v in ("", "simulated"):
         return "simulated"
+    if v in ("asaas", "asaas_sandbox"):
+        return "asaas"
     if v in ("stripe", "stripe_sandbox"):
         return "stripe"
-    return "asaas"
+    raise ATLError(CONFIG_INVALID, f"unknown ATL_RAIL {value!r}: use simulated, asaas or stripe_sandbox")
 
 
 def load_settings(*, stdin_isatty: bool | None = None) -> Settings:

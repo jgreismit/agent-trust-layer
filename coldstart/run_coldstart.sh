@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Cold-start usability test (MIT AI Studio HW9): a fresh Claude Code session gets only docs/agent-guide.md,
+# Cold-start usability test (MIT AI Studio HW9): a fresh Claude Code session gets only docs/AGENT_GUIDE.md,
 # the ATL MCP server and a task. No scripted call sequence, no expected answer, no help during the run.
 #
 # Usage (from the repo root):  coldstart/run_coldstart.sh coldstart/task-NF-1042.md [model]
@@ -25,7 +25,7 @@ uv run --directory "$REPO" atl mandate register "$RUN/mandate.json"
 printf '{"balance_cents": 500000, "transfers": []}\n' > "$RUN/atl-var/sim_rail.json"
 
 # The agent's workspace: the guide and the invoices, nothing else.
-cp "$REPO/docs/agent-guide.md" "$RUN/work/AGENT_GUIDE.md"
+cp "$REPO/docs/AGENT_GUIDE.md" "$RUN/work/AGENT_GUIDE.md"
 cp "$REPO"/coldstart/inbox/*.txt "$RUN/work/inbox/"
 cat > "$RUN/mcp.json" <<EOF
 {"mcpServers": {"atl": {"command": "$(command -v uv)", "args": ["run", "--directory", "$REPO", "python", "-m", "atl.mcp_server"],

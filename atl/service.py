@@ -105,6 +105,28 @@ NEXT_ACTION_BY_STATUS = {
     "pending_rail_confirmation": "wait_for_owner",
 }
 WAITING_STATUSES = ("pending_owner", "pending_rail_confirmation")
+
+
+def next_step(next_action: str, expires_at: str | None = None) -> str:
+    """One plain instruction per next_action (HW9 tester finding: the agent ended its turn 2 minutes into a
+    15-minute escalation). Agents read this sentence; next_action stays the machine-readable field."""
+    if next_action == "wait_for_owner":
+        until = f" (until {expires_at})" if expires_at else ""
+        return (
+            "The owner has not decided yet. Do not end your turn and do not pay: call get_decision with this "
+            f"decision_id and wait_seconds=30 again and again until next_action changes{until}. Then follow "
+            "the new next_action."
+        )
+    if next_action == "call_execute_payment":
+        return (
+            "Approved. Call execute_payment with this decision_id now (only you can execute it; the owner "
+            "cannot), then verify_receipt. An approved decision does not expire."
+        )
+    if next_action == "do_not_pay_report_to_owner":
+        return "Do not pay and do not resubmit with changed values. Report the reasons to the owner."
+    if next_action == "already_executed":
+        return "Already paid. Use receipt_id; call verify_receipt if you have not yet."
+    return ""
 _SUMMARY_KEYS = ("decision_id", "verdict", "status", "rule_hits", "transfer_id", "receipt_id", "error")
 
 
@@ -407,6 +429,7 @@ class ATLService:
             "next_action": NEXT_ACTION_BY_VERDICT[decision.verdict],
             "receipt_id": receipt.receipt_id,
             "original_decision_id": decision.original_decision_id,
+            **self._wait_fields(decision, NEXT_ACTION_BY_VERDICT[decision.verdict]),
         }
 
     def _rail_currency_check(self, decision: Decision, mandate: Mandate | None) -> Decision:
@@ -485,7 +508,18 @@ class ATLService:
             "next_action": NEXT_ACTION_BY_STATUS[decision.status],
             "transfer_id": transfer.transfer_id if transfer else None,
             "receipt_id": receipt.receipt_id if receipt else None,
+            **self._wait_fields(decision, NEXT_ACTION_BY_STATUS[decision.status]),
         }
+
+    def _wait_fields(self, decision: Decision, next_action: str) -> dict:
+        """expires_at for an escalation still waiting for the owner, and next_step for every decision."""
+        expires_at = None
+        if decision.status == "pending_owner":
+            expires_at = (decision.created_at + timedelta(seconds=ESCALATION_TTL_SECONDS)).isoformat()
+        out = {"next_step": next_step(next_action, expires_at)}
+        if expires_at:
+            out["expires_at"] = expires_at
+        return out
 
     # -------------------------------------------------------------- approvals
 

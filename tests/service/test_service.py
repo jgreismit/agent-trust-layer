@@ -90,6 +90,7 @@ def test_pay_check_approve_shape_and_receipt(h):
         "next_action",
         "receipt_id",
         "original_decision_id",
+        "next_step",
     }
     assert r["verdict"] == "approve" and r["status"] == "approved"
     assert r["next_action"] == "call_execute_payment"
