@@ -13,7 +13,7 @@ service only; the course homework (benchmarks, agents, demos) lives in the team'
 - **MCP server** (stdio): `python -m atl.mcp_server`, with tools `register_mandate`, `pay_check`, `get_decision`,
   `execute_payment`, `get_receipt`, `verify_receipt`.
 - **Owner CLI**: `atl mandate register FILE` (sign with the owner key and register), `atl approve ID`,
-  `atl refuse ID`, `atl revoke ID`, `atl rail-balance`, `atl reset`. (`atl demo` needs the full project.)
+  `atl refuse ID`, `atl revoke ID`, `atl rail balance`, `atl reset`. (`atl demo` needs the full project.)
 - **Rules**: `atl/policy` (R1 to R10, deterministic, no model calls). Rails: `atl/rails` (simulated rail, and
   the Asaas Pix sandbox).
 
